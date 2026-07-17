@@ -246,9 +246,25 @@ textarea.input { resize: vertical; min-height: 70px; line-height: 1.5; }
 }
 .captcha-img svg { display: block; }
 
-.google-btn { width: 100%; justify-content: center; gap: 10px; }
-.g-logo { display: inline-flex; }
-.g-logo svg { width: 18px; height: 18px; }
+.linklike {
+  background: none; border: none; cursor: pointer;
+  color: var(--accent); font: inherit; font-size: 0.88rem; font-weight: 600;
+  padding: 0; align-self: center;
+}
+.linklike:hover { text-decoration: underline; }
+
+.avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.avatar-big { width: 96px; height: 96px; font-size: 2.2rem; flex-shrink: 0; }
+
+.userbox-link {
+  display: flex; align-items: center; gap: 10px;
+  flex: 1; min-width: 0; color: var(--text);
+  border-radius: 10px; padding: 2px;
+}
+.userbox-link:hover .username { color: var(--accent); }
+
+.profile-card { display: flex; flex-direction: column; gap: 12px; }
+.profile-card .row.gap .input { flex: 1; }
 
 /* ---------- today ---------- */
 

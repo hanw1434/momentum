@@ -6,6 +6,7 @@ import { archiveView } from './views/archive.js';
 import { goalsView } from './views/goals.js';
 import { bulletinView } from './views/bulletin.js';
 import { presetsView } from './views/presets.js';
+import { profileView } from './views/profile.js';
 
 const NAV = [
   { id: 'today', emoji: '☀️', label: 'Today', view: todayView },
@@ -20,7 +21,13 @@ const root = document.getElementById('app');
 let user = null;
 let main = null;
 let navLinks = [];
-let serverConfig = { googleClientId: '' };
+
+// Views (e.g. Profile) read and update the signed-in user through these.
+export function getUser() { return user; }
+export function setUser(u) {
+  user = u;
+  renderShell();
+}
 
 // ---------------- theme ----------------
 // No stored preference = follow the system. The toggle forces light/dark
@@ -65,22 +72,29 @@ async function boot() {
   if ('serviceWorker' in navigator) {
     try { await navigator.serviceWorker.register('/sw.js'); } catch { /* offline support optional */ }
   }
-  try { serverConfig = await api('/api/config'); } catch { /* google button falls back to explainer */ }
+  // Password reset links look like /#/reset/<token>.
+  const rm = location.hash.match(/^#\/reset\/([0-9a-f-]{36})$/);
+  if (rm) {
+    renderResetForm(rm[1]);
+    return;
+  }
 
   // Email verification links look like /#/verify/<token>.
   const vm = location.hash.match(/^#\/verify\/([0-9a-f-]{36})$/);
-  if (vm && !getToken()) {
+  if (vm) {
     history.replaceState(null, '', '#/today');
     try {
       const res = await api('/api/auth/verify', { method: 'POST', body: { token: vm[1] } });
       setToken(res.token);
       user = res.user;
       renderShell();
-      toast('✅ Email verified — welcome to Momentum!');
+      toast('✅ Email verified!');
       return;
     } catch (ex) {
-      renderAuth(ex.message);
-      return;
+      if (!getToken()) {
+        renderAuth(ex.message);
+        return;
+      }
     }
   }
 
@@ -91,8 +105,6 @@ async function boot() {
 }
 
 // ---------------- auth screen ----------------
-
-const G_LOGO_SVG = '<svg viewBox="0 0 48 48" width="18" height="18"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>';
 
 function captchaWidget() {
   const img = h('div', { class: 'captcha-img' });
@@ -197,20 +209,10 @@ function renderAuth(initialError = '') {
     }
   }, username, emailWrap, password, captcha.el, err, submit, resendBtn);
 
-  // Google entry point is always visible; unconfigured servers explain what's missing.
-  const gWrap = h('div', { class: 'gsi-holder' });
-  if (serverConfig.googleClientId) {
-    mountGoogleButton(gWrap, err);
-  } else {
-    const gLogo = h('span', { class: 'g-logo' });
-    gLogo.innerHTML = G_LOGO_SVG;
-    gWrap.append(h('button', {
-      class: 'btn btn-ghost google-btn', type: 'button',
-      onclick: () => {
-        err.textContent = "Google sign-in isn't active on this server yet — it needs a free Google OAuth client ID (see README → “Google sign-in”). Password sign-up works right away.";
-      }
-    }, gLogo, 'Continue with Google'));
-  }
+  const forgotLink = h('button', {
+    class: 'linklike', type: 'button',
+    onclick: () => renderForgot()
+  }, 'Forgot password?');
 
   const card = h('div', { class: 'card auth-card' },
     h('div', { class: 'auth-hero' },
@@ -219,8 +221,7 @@ function renderAuth(initialError = '') {
       h('p', { class: 'tagline' }, 'Daily checklists, goals & reminders — your day, on track.')),
     h('div', { class: 'auth-tabs' }, tabs),
     form,
-    h('div', { class: 'divider' }, 'or'),
-    gWrap);
+    forgotLink);
 
   function showPending(res) {
     const bits = [
@@ -253,41 +254,86 @@ function renderAuth(initialError = '') {
   root.replaceChildren(h('div', { class: 'auth-wrap' }, card));
 }
 
-let gisLoading = null;
-function loadGis() {
-  if (window.google?.accounts?.id) return Promise.resolve();
-  if (!gisLoading) {
-    gisLoading = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://accounts.google.com/gsi/client';
-      s.onload = resolve;
-      s.onerror = () => { gisLoading = null; reject(new Error('Could not load Google sign-in')); };
-      document.head.append(s);
-    });
-  }
-  return gisLoading;
-}
+// ---------------- forgot / reset password ----------------
 
-async function mountGoogleButton(holder, err) {
-  try {
-    await loadGis();
-    window.google.accounts.id.initialize({
-      client_id: serverConfig.googleClientId,
-      callback: async resp => {
+function renderForgot() {
+  const err = h('p', { class: 'form-error' });
+  const ident = h('input', { class: 'input', placeholder: 'Username or email', autocomplete: 'username', required: true });
+  const captcha = captchaWidget();
+  const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Send reset link');
+
+  const card = h('div', { class: 'card auth-card' },
+    h('div', { class: 'auth-hero' },
+      h('span', { class: 'starter-emoji' }, '🔑'),
+      h('h1', {}, 'Reset password'),
+      h('p', { class: 'tagline' }, "Enter your username or email and we'll send a reset link to the email on your account.")),
+    h('form', {
+      class: 'form-col',
+      onsubmit: async e => {
+        e.preventDefault();
+        err.textContent = '';
+        submit.disabled = true;
         try {
-          const res = await api('/api/auth/google', { method: 'POST', body: { credential: resp.credential } });
-          setToken(res.token);
-          user = res.user;
-          renderShell();
+          const res = await api('/api/auth/forgot', {
+            method: 'POST',
+            body: { identifier: ident.value, captchaId: captcha.id, captchaAnswer: captcha.answer }
+          });
+          card.replaceChildren(
+            h('div', { class: 'auth-hero' },
+              h('span', { class: 'starter-emoji' }, '📮'),
+              h('h1', {}, 'Check your email'),
+              h('p', { class: 'tagline' }, res.message)),
+            h('button', { class: 'btn btn-ghost', onclick: () => renderAuth() }, '← Back to sign in'));
         } catch (ex) {
           err.textContent = ex.message;
+          captcha.refresh();
+        } finally {
+          submit.disabled = false;
         }
       }
-    });
-    window.google.accounts.id.renderButton(holder, { theme: 'outline', size: 'large', shape: 'pill', width: 280 });
-  } catch (ex) {
-    err.textContent = ex.message;
-  }
+    }, ident, captcha.el, err, submit),
+    h('button', { class: 'linklike', type: 'button', onclick: () => renderAuth() }, '← Back to sign in'));
+
+  root.replaceChildren(h('div', { class: 'auth-wrap' }, card));
+}
+
+function renderResetForm(token) {
+  const err = h('p', { class: 'form-error' });
+  const pw1 = h('input', { class: 'input', type: 'password', placeholder: 'New password (min 6 characters)', autocomplete: 'new-password', required: true });
+  const pw2 = h('input', { class: 'input', type: 'password', placeholder: 'Repeat new password', autocomplete: 'new-password', required: true });
+  const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Set new password');
+
+  root.replaceChildren(
+    h('div', { class: 'auth-wrap' },
+      h('div', { class: 'card auth-card' },
+        h('div', { class: 'auth-hero' },
+          h('span', { class: 'starter-emoji' }, '🔑'),
+          h('h1', {}, 'Choose a new password')),
+        h('form', {
+          class: 'form-col',
+          onsubmit: async e => {
+            e.preventDefault();
+            err.textContent = '';
+            if (pw1.value !== pw2.value) {
+              err.textContent = "Those passwords don't match.";
+              return;
+            }
+            submit.disabled = true;
+            try {
+              const res = await api('/api/auth/reset', { method: 'POST', body: { token, password: pw1.value } });
+              setToken(res.token);
+              user = res.user;
+              history.replaceState(null, '', '#/today');
+              renderShell();
+              toast('✅ Password updated — you are signed in.');
+            } catch (ex) {
+              err.textContent = ex.message;
+            } finally {
+              submit.disabled = false;
+            }
+          }
+        }, pw1, pw2, err, submit),
+        h('button', { class: 'linklike', type: 'button', onclick: () => { history.replaceState(null, '', '#/today'); renderAuth(); } }, '← Back to sign in'))));
 }
 
 // ---------------- app shell ----------------
@@ -307,8 +353,9 @@ function renderShell() {
     h('div', { class: 'sidebar-spacer' }),
     notifBanner(),
     h('div', { class: 'userbox' },
-      h('div', { class: 'avatar' }, user.username[0]),
-      h('span', { class: 'username' }, user.username),
+      h('a', { class: 'userbox-link', href: '#/profile', title: 'Open your profile' },
+        avatarEl(user),
+        h('span', { class: 'username' }, user.username)),
       themeButton(),
       h('button', {
         class: 'icon-btn', title: 'Log out',
@@ -337,17 +384,35 @@ function notifBanner() {
 
 window.addEventListener('hashchange', () => { if (user) route(); });
 
+// Shared avatar renderer: photo if set, first letter otherwise.
+export function avatarEl(u, big = false) {
+  const el = h('div', { class: `avatar${big ? ' avatar-big' : ''}` });
+  if (u.avatar) {
+    el.append(h('img', { src: u.avatar, alt: '' }));
+  } else {
+    el.textContent = u.username[0];
+  }
+  return el;
+}
+
 function route() {
   const parts = location.hash.split('/'); // '#/archive/2026-07-16' -> ['#', 'archive', '2026-07-16']
   if (parts[1] === 'logout') return renderLogoutPage();
-  const entry = NAV.find(n => n.id === parts[1]) || NAV[0];
-  navLinks.forEach((link, i) => link.classList.toggle('active', NAV[i] === entry));
-  main.scrollTop = 0;
-  entry.view(main, parts[2]).catch(ex => {
+  const showError = ex => {
     main.replaceChildren(h('div', { class: 'empty-state' },
       h('span', { class: 'big' }, '😕'),
       h('p', {}, `Couldn't load this page: ${ex.message}`)));
-  });
+  };
+  if (parts[1] === 'profile') {
+    navLinks.forEach(link => link.classList.remove('active'));
+    main.scrollTop = 0;
+    profileView(main).catch(showError);
+    return;
+  }
+  const entry = NAV.find(n => n.id === parts[1]) || NAV[0];
+  navLinks.forEach((link, i) => link.classList.toggle('active', NAV[i] === entry));
+  main.scrollTop = 0;
+  entry.view(main, parts[2]).catch(showError);
 }
 
 function renderLogoutPage() {

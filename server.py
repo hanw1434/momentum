@@ -11,8 +11,6 @@ import smtplib
 import threading
 import time
 import uuid
-import urllib.request
-import urllib.parse
 from email.message import EmailMessage
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -46,8 +44,7 @@ else:
     with open(SECRET_PATH, 'w', encoding='utf-8') as f:
         f.write(SECRET.decode())
 
-# Optional settings (currently: Google sign-in). Set GOOGLE_CLIENT_ID as an
-# environment variable, or put {"googleClientId": "..."} in data/config.json.
+# Optional settings via environment variables or data/config.json.
 CONFIG_PATH = os.path.join(DATA_DIR, 'config.json')
 _config = {}
 if os.path.exists(CONFIG_PATH):
@@ -56,8 +53,6 @@ if os.path.exists(CONFIG_PATH):
             _config = json.load(f)
     except Exception:
         _config = {}
-GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID') or _config.get('googleClientId') or ''
-
 # Email sending (verification links). Without SMTP settings the app runs in
 # "dev mode": the verification link is shown in the UI instead of emailed.
 SMTP_HOST = os.environ.get('SMTP_HOST') or _config.get('smtpHost') or ''
@@ -131,7 +126,9 @@ def verify_token(token):
 
 
 def public_user(u):
-    return {'id': u['id'], 'username': u['username']}
+    return {'id': u['id'], 'username': u['username'], 'email': u.get('email') or '',
+            'emailVerified': bool(u.get('emailVerified')), 'pendingEmail': u.get('pendingEmail') or '',
+            'avatar': u.get('avatar') or ''}
 
 
 # ---------------- routing ----------------
@@ -216,16 +213,12 @@ def check_captcha(body):
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 
-def send_verification_email(to_addr, token):
-    link = f'{BASE_URL}/#/verify/{token}'
+def send_email(to_addr, subject, text):
     msg = EmailMessage()
-    msg['Subject'] = 'Verify your Momentum account'
+    msg['Subject'] = subject
     msg['From'] = SMTP_FROM
     msg['To'] = to_addr
-    msg.set_content(
-        'Welcome to Momentum!\n\n'
-        f'Click this link to verify your account:\n{link}\n\n'
-        "If you didn't sign up, you can ignore this email.")
+    msg.set_content(text)
     try:
         if SMTP_PORT == 465:
             with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as s:
@@ -241,6 +234,13 @@ def send_verification_email(to_addr, token):
         return True
     except Exception:
         return False
+
+
+def send_verification_email(to_addr, token):
+    return send_email(
+        to_addr, 'Verify your Momentum email',
+        f'Click this link to verify your email address:\n{BASE_URL}/#/verify/{token}\n\n'
+        "If you didn't request this, you can ignore this email.")
 
 
 # ---------------- auth ----------------
@@ -284,10 +284,110 @@ def verify_email(user, body):
         found = next((u for u in db['users'] if token_val and u.get('verifyToken') == token_val), None)
         if not found:
             return 400, {'error': 'This verification link is invalid or was already used'}
+        pending = found.get('pendingEmail')
+        if pending:
+            if any(u['id'] != found['id'] and (u.get('email') or '').lower() == pending.lower() for u in db['users']):
+                return 409, {'error': 'That email is now used by another account'}
+            found['email'] = found.pop('pendingEmail')
         found['emailVerified'] = True
         found.pop('verifyToken', None)
         save()
     return 200, {'token': issue_token(found), 'user': public_user(found)}
+
+
+@route('POST', '/api/auth/forgot', needs_auth=False)
+def forgot_password(user, body):
+    if not check_captcha(body):
+        return 400, {'error': 'Captcha was wrong or expired — try the new one', 'captchaFailed': True}
+    ident = clean_str(body.get('identifier'), 120).lower()
+    with LOCK:
+        found = next((u for u in db['users']
+                      if u['username'].lower() == ident or (u.get('email') or '').lower() == ident), None)
+        # Reset needs an email on file and a password to reset.
+        if found and found.get('email') and found.get('passwordHash'):
+            found['resetToken'] = uid()
+            found['resetExpires'] = time.time() + 3600
+            save()
+        else:
+            found = None
+    if found:
+        link = f"{BASE_URL}/#/reset/{found['resetToken']}"
+        if EMAIL_ENABLED:
+            send_email(found['email'], 'Reset your Momentum password',
+                       f'Someone (hopefully you) asked to reset your Momentum password.\n\n'
+                       f'Click this link to choose a new one (valid for 1 hour):\n{link}\n\n'
+                       "If this wasn't you, ignore this email — your password is unchanged.")
+        else:
+            # No email configured: never expose the link to the requester —
+            # that would let anyone take over any account. The server owner
+            # can retrieve it from the server log.
+            print(f"[password reset] link for {found['username']}: {link}", flush=True)
+    if EMAIL_ENABLED:
+        return 200, {'message': 'If that account exists, a reset link is on its way to its email address (valid for 1 hour).'}
+    return 200, {'message': 'If that account exists, a reset link has been generated. This server has no email sending configured, so the link was written to the server log — ask the site owner for it.'}
+
+
+@route('POST', '/api/auth/reset', needs_auth=False)
+def reset_password(user, body):
+    token_val = str(body.get('token') or '')
+    password = str(body.get('password') or '')
+    if len(password) < 6:
+        return 400, {'error': 'Password must be at least 6 characters'}
+    with LOCK:
+        found = next((u for u in db['users'] if token_val and u.get('resetToken') == token_val), None)
+        if not found or found.get('resetExpires', 0) < time.time():
+            return 400, {'error': 'This reset link is invalid or has expired — request a new one'}
+        found['passwordHash'] = hash_password(password)
+        found.pop('resetToken', None)
+        found.pop('resetExpires', None)
+        found['emailVerified'] = True  # clicking the emailed link proves the address
+        save()
+    return 200, {'token': issue_token(found), 'user': public_user(found)}
+
+
+# ---------------- profile ----------------
+
+AVATAR_RE = re.compile(r'^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$')
+
+
+@route('PATCH', '/api/profile')
+def update_profile(user, body):
+    result = {}
+    with LOCK:
+        if body.get('email') is not None:
+            email = clean_str(body.get('email'), 120).lower()
+            if not EMAIL_RE.match(email):
+                return 400, {'error': 'Enter a valid email address'}
+            taken = any(u['id'] != user['id'] and email in (
+                (u.get('email') or '').lower(), (u.get('pendingEmail') or '').lower())
+                for u in db['users'])
+            if taken:
+                return 409, {'error': 'That email is already used by another account'}
+            if email == (user.get('email') or '').lower() and user.get('emailVerified'):
+                user.pop('pendingEmail', None)
+                result['message'] = 'That is already your verified email.'
+            else:
+                user['pendingEmail'] = email
+                user['verifyToken'] = uid()
+                if EMAIL_ENABLED:
+                    if send_verification_email(email, user['verifyToken']):
+                        result['message'] = f'Verification link sent to {email} — click it to activate the new address.'
+                    else:
+                        result['message'] = 'Could not send the verification email right now — try again in a minute.'
+                else:
+                    result['message'] = 'Email saved — no email sending is configured on this server, so verify with the button below:'
+                    result['devVerifyUrl'] = f"/#/verify/{user['verifyToken']}"
+        if body.get('avatar') is not None:
+            avatar = str(body['avatar'])
+            if avatar == '':
+                user.pop('avatar', None)
+            elif not AVATAR_RE.match(avatar) or len(avatar) > 200000:
+                return 400, {'error': 'Invalid image — upload a normal photo and it will be resized automatically'}
+            else:
+                user['avatar'] = avatar
+        save()
+    result['user'] = public_user(user)
+    return 200, result
 
 
 @route('POST', '/api/auth/resend', needs_auth=False)
@@ -322,56 +422,11 @@ def login(user, body):
     username = clean_str(body.get('username'), 24)
     password = str(body.get('password') or '')
     found = next((u for u in db['users'] if u['username'].lower() == username.lower()), None)
-    if found and not found.get('passwordHash'):
-        return 401, {'error': 'This account uses Google sign-in'}
     if not found or not check_password(password, found.get('passwordHash') or ''):
         return 401, {'error': 'Wrong username or password'}
     # Accounts created before email support have no email and stay usable.
     if found.get('email') and not found.get('emailVerified'):
         return 403, {'error': 'Please verify your email first — check your inbox.', 'unverified': True}
-    return 200, {'token': issue_token(found), 'user': public_user(found)}
-
-
-@route('GET', '/api/config', needs_auth=False)
-def get_config(user, body):
-    return 200, {'googleClientId': GOOGLE_CLIENT_ID}
-
-
-@route('POST', '/api/auth/google', needs_auth=False)
-def google_auth(user, body):
-    if not GOOGLE_CLIENT_ID:
-        return 400, {'error': 'Google sign-in is not configured on this server'}
-    credential = str(body.get('credential') or '')
-    if not credential:
-        return 400, {'error': 'Missing Google credential'}
-    # Verify the ID token with Google (aud must match our client id).
-    try:
-        url = 'https://oauth2.googleapis.com/tokeninfo?id_token=' + urllib.parse.quote(credential)
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            info = json.load(resp)
-    except Exception:
-        return 401, {'error': 'Could not verify Google sign-in'}
-    if info.get('aud') != GOOGLE_CLIENT_ID:
-        return 401, {'error': 'Google sign-in was issued for a different app'}
-    if str(info.get('email_verified')).lower() != 'true':
-        return 401, {'error': 'Google account email is not verified'}
-    sub = str(info.get('sub') or '')
-    email = str(info.get('email') or '')
-    if not sub:
-        return 401, {'error': 'Could not verify Google sign-in'}
-    with LOCK:
-        found = next((u for u in db['users'] if u.get('googleSub') == sub), None)
-        if not found:
-            base = re.sub(r'[^a-zA-Z0-9._-]', '', email.split('@')[0])[:20] or 'user'
-            username = base
-            suffix = 1
-            while any(u['username'].lower() == username.lower() for u in db['users']):
-                suffix += 1
-                username = f'{base}{suffix}'
-            found = {'id': uid(), 'username': username, 'googleSub': sub, 'email': email,
-                     'emailVerified': True, 'createdAt': now_iso()}
-            db['users'].append(found)
-            save()
     return 200, {'token': issue_token(found), 'user': public_user(found)}
 
 

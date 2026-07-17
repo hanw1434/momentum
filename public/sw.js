@@ -1,7 +1,7 @@
 // Momentum service worker: enables installation as a PWA and offline fallback.
 // Network-first for everything so development and deploys stay fresh;
 // cached copies are served only when the network is unavailable.
-const CACHE = 'momentum-v2';
+const CACHE = 'momentum-v3';
 
 self.addEventListener('install', event => {
   event.waitUntil(
@@ -9,6 +9,7 @@ self.addEventListener('install', event => {
       '/', '/css/style.css', '/js/api.js', '/js/ui.js', '/js/app.js',
       '/js/views/today.js', '/js/views/calendar.js', '/js/views/archive.js',
       '/js/views/goals.js', '/js/views/bulletin.js', '/js/views/presets.js',
+      '/js/views/profile.js',
       '/manifest.webmanifest', '/icons/icon.svg'
     ]).catch(() => {}))
   );

@@ -27,15 +27,11 @@ For a real App Store listing you would wrap this app with [Capacitor](https://ca
 
 Calendar reminders fire as system notifications (plus in-app toasts) at each lead time you pick — while the app is open in a tab or installed as a PWA. True push notifications with the app fully closed require a hosted push service (e.g. Web Push with a VAPID server), which this self-contained build intentionally avoids.
 
-## Google sign-in (optional)
+## Profile & password recovery
 
-1. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials) create an **OAuth client ID** of type *Web application*.
-2. Add your app's URL(s) to **Authorized JavaScript origins** (e.g. `http://localhost:4000` and your deployed HTTPS URL).
-3. Give the client ID to the server either as an environment variable `GOOGLE_CLIENT_ID=...` or in `data/config.json`:
-   ```json
-   { "googleClientId": "1234567890-abc.apps.googleusercontent.com" }
-   ```
-4. Restart the server. A "Sign in with Google" button appears on the login screen automatically. Google accounts and username/password accounts are separate accounts.
+Clicking your name/avatar (bottom-left) opens your profile, where you can set or change your email (the new address activates only after clicking its verification link) and upload or remove a profile photo (resized client-side to 128px, stored with the account).
+
+"Forgot password?" on the sign-in screen sends a single-use, 1-hour reset link to the account's email. With no SMTP configured, the link is **written to the server log only** (never shown to the requester — that would allow account takeover); the site owner can retrieve it from the log.
 
 ## Deploying
 
