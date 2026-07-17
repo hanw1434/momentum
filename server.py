@@ -2,15 +2,18 @@
 """Momentum - personal productivity tracker. Pure-stdlib backend: no dependencies."""
 import json
 import os
+import random
 import re
 import hmac
 import hashlib
 import secrets
+import smtplib
 import threading
 import time
 import uuid
 import urllib.request
 import urllib.parse
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
@@ -54,6 +57,16 @@ if os.path.exists(CONFIG_PATH):
     except Exception:
         _config = {}
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID') or _config.get('googleClientId') or ''
+
+# Email sending (verification links). Without SMTP settings the app runs in
+# "dev mode": the verification link is shown in the UI instead of emailed.
+SMTP_HOST = os.environ.get('SMTP_HOST') or _config.get('smtpHost') or ''
+SMTP_PORT = int(os.environ.get('SMTP_PORT') or _config.get('smtpPort') or 587)
+SMTP_USER = os.environ.get('SMTP_USER') or _config.get('smtpUser') or ''
+SMTP_PASS = os.environ.get('SMTP_PASS') or _config.get('smtpPass') or ''
+SMTP_FROM = os.environ.get('SMTP_FROM') or _config.get('smtpFrom') or SMTP_USER
+BASE_URL = (os.environ.get('BASE_URL') or _config.get('baseUrl') or f'http://localhost:{PORT}').rstrip('/')
+EMAIL_ENABLED = bool(SMTP_HOST and SMTP_FROM)
 
 LOCK = threading.RLock()
 
@@ -139,27 +152,173 @@ def clean_str(value, limit):
     return str(value or '').strip()[:limit]
 
 
+# ---------------- captcha ----------------
+# Self-contained: the server draws a distorted-character SVG and remembers the
+# answer for 10 minutes. Each captcha is single-use (consumed on any attempt).
+
+CAPTCHA_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'  # no ambiguous 0/O/1/I
+_captchas = {}  # id -> (text, expires_at)
+
+
+def make_captcha_svg(text):
+    rnd = random.Random()
+    w, ht = 210, 70
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{ht}" viewBox="0 0 {w} {ht}">']
+    for _ in range(4):
+        parts.append(
+            f'<path d="M{rnd.randint(0, w)} {rnd.randint(0, ht)} Q {rnd.randint(0, w)} {rnd.randint(0, ht)} '
+            f'{rnd.randint(0, w)} {rnd.randint(0, ht)}" stroke="#8a91a5" stroke-width="1.5" fill="none" opacity="0.55"/>')
+    glyphs = []
+    x = 22
+    for ch in text:
+        rot = rnd.randint(-28, 28)
+        y = rnd.randint(40, 54)
+        size = rnd.randint(27, 36)
+        glyphs.append(f'<text x="{x}" y="{y}" font-size="{size}" font-weight="bold" '
+                      f'font-family="Georgia, serif" fill="currentColor" transform="rotate({rot} {x} {y})">{ch}</text>')
+        x += 34
+    # Invisible decoy glyphs + shuffled markup order make naive DOM-scraping harder.
+    for _ in range(4):
+        glyphs.append(f'<text x="{rnd.randint(10, w - 20)}" y="{rnd.randint(35, 55)}" font-size="30" '
+                      f'fill="currentColor" opacity="0">{rnd.choice(CAPTCHA_CHARS)}</text>')
+    rnd.shuffle(glyphs)
+    parts.extend(glyphs)
+    for _ in range(30):
+        parts.append(f'<circle cx="{rnd.randint(0, w)}" cy="{rnd.randint(0, ht)}" r="1" fill="#8a91a5" opacity="0.5"/>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+@route('GET', '/api/captcha', needs_auth=False)
+def get_captcha(user, body):
+    with LOCK:
+        now = time.time()
+        for key in [k for k, v in _captchas.items() if v[1] < now]:
+            _captchas.pop(key, None)
+        if len(_captchas) > 5000:
+            _captchas.clear()
+        text = ''.join(secrets.choice(CAPTCHA_CHARS) for _ in range(5))
+        cid = uid()
+        _captchas[cid] = (text, now + 600)
+    return 200, {'captchaId': cid, 'svg': make_captcha_svg(text)}
+
+
+def check_captcha(body):
+    cid = str(body.get('captchaId') or '')
+    answer = str(body.get('captchaAnswer') or '').strip().upper()
+    with LOCK:
+        entry = _captchas.pop(cid, None)
+    return bool(entry and entry[1] >= time.time() and answer and answer == entry[0])
+
+
+# ---------------- email verification ----------------
+
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def send_verification_email(to_addr, token):
+    link = f'{BASE_URL}/#/verify/{token}'
+    msg = EmailMessage()
+    msg['Subject'] = 'Verify your Momentum account'
+    msg['From'] = SMTP_FROM
+    msg['To'] = to_addr
+    msg.set_content(
+        'Welcome to Momentum!\n\n'
+        f'Click this link to verify your account:\n{link}\n\n'
+        "If you didn't sign up, you can ignore this email.")
+    try:
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+                if SMTP_USER:
+                    s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+                s.starttls()
+                if SMTP_USER:
+                    s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
+        return True
+    except Exception:
+        return False
+
+
 # ---------------- auth ----------------
 
 @route('POST', '/api/auth/register', needs_auth=False)
 def register(user, body):
+    if not check_captcha(body):
+        return 400, {'error': 'Captcha was wrong or expired — try the new one', 'captchaFailed': True}
     username = clean_str(body.get('username'), 24)
+    email = clean_str(body.get('email'), 120).lower()
     password = str(body.get('password') or '')
     if not USERNAME_RE.match(username):
         return 400, {'error': 'Username must be 3-24 characters (letters, numbers, . _ -)'}
+    if not EMAIL_RE.match(email):
+        return 400, {'error': 'Enter a valid email address'}
     if len(password) < 6:
         return 400, {'error': 'Password must be at least 6 characters'}
     with LOCK:
         if any(u['username'].lower() == username.lower() for u in db['users']):
             return 409, {'error': 'That username is taken'}
-        new_user = {'id': uid(), 'username': username, 'passwordHash': hash_password(password), 'createdAt': now_iso()}
+        if any((u.get('email') or '').lower() == email for u in db['users']):
+            return 409, {'error': 'An account with that email already exists'}
+        verify_token_val = uid()
+        new_user = {'id': uid(), 'username': username, 'email': email, 'emailVerified': False,
+                    'verifyToken': verify_token_val, 'passwordHash': hash_password(password), 'createdAt': now_iso()}
         db['users'].append(new_user)
         save()
-    return 200, {'token': issue_token(new_user), 'user': public_user(new_user)}
+    if EMAIL_ENABLED:
+        if send_verification_email(email, verify_token_val):
+            return 200, {'needsVerification': True, 'message': f'We sent a verification link to {email}. Click it to activate your account.'}
+        return 200, {'needsVerification': True, 'message': 'Account created, but the verification email could not be sent right now. Use “Resend” in a minute.'}
+    return 200, {'needsVerification': True,
+                 'message': 'This server has no email sending configured, so verify with the button below instead:',
+                 'devVerifyUrl': f'/#/verify/{verify_token_val}'}
+
+
+@route('POST', '/api/auth/verify', needs_auth=False)
+def verify_email(user, body):
+    token_val = str(body.get('token') or '')
+    with LOCK:
+        found = next((u for u in db['users'] if token_val and u.get('verifyToken') == token_val), None)
+        if not found:
+            return 400, {'error': 'This verification link is invalid or was already used'}
+        found['emailVerified'] = True
+        found.pop('verifyToken', None)
+        save()
+    return 200, {'token': issue_token(found), 'user': public_user(found)}
+
+
+@route('POST', '/api/auth/resend', needs_auth=False)
+def resend_verification(user, body):
+    if not check_captcha(body):
+        return 400, {'error': 'Captcha was wrong or expired — try the new one', 'captchaFailed': True}
+    ident = clean_str(body.get('identifier'), 120).lower()
+    with LOCK:
+        found = next((u for u in db['users']
+                      if u['username'].lower() == ident or (u.get('email') or '').lower() == ident), None)
+        if found and found.get('email') and not found.get('emailVerified'):
+            if not found.get('verifyToken'):
+                found['verifyToken'] = uid()
+                save()
+            token_val = found['verifyToken']
+        else:
+            found = None
+    generic = {'message': 'If that account needs verification, a new link is on its way.'}
+    if not found:
+        return 200, generic
+    if EMAIL_ENABLED:
+        send_verification_email(found['email'], token_val)
+        return 200, generic
+    return 200, {'message': 'This server has no email sending configured — verify with the button below:',
+                 'devVerifyUrl': f'/#/verify/{token_val}'}
 
 
 @route('POST', '/api/auth/login', needs_auth=False)
 def login(user, body):
+    if not check_captcha(body):
+        return 400, {'error': 'Captcha was wrong or expired — try the new one', 'captchaFailed': True}
     username = clean_str(body.get('username'), 24)
     password = str(body.get('password') or '')
     found = next((u for u in db['users'] if u['username'].lower() == username.lower()), None)
@@ -167,6 +326,9 @@ def login(user, body):
         return 401, {'error': 'This account uses Google sign-in'}
     if not found or not check_password(password, found.get('passwordHash') or ''):
         return 401, {'error': 'Wrong username or password'}
+    # Accounts created before email support have no email and stay usable.
+    if found.get('email') and not found.get('emailVerified'):
+        return 403, {'error': 'Please verify your email first — check your inbox.', 'unverified': True}
     return 200, {'token': issue_token(found), 'user': public_user(found)}
 
 
@@ -206,7 +368,8 @@ def google_auth(user, body):
             while any(u['username'].lower() == username.lower() for u in db['users']):
                 suffix += 1
                 username = f'{base}{suffix}'
-            found = {'id': uid(), 'username': username, 'googleSub': sub, 'email': email, 'createdAt': now_iso()}
+            found = {'id': uid(), 'username': username, 'googleSub': sub, 'email': email,
+                     'emailVerified': True, 'createdAt': now_iso()}
             db['users'].append(found)
             save()
     return 200, {'token': issue_token(found), 'user': public_user(found)}

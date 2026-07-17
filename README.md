@@ -68,7 +68,24 @@ A `Dockerfile` is included — the app runs on any container host (Render, Fly.i
 
 ## Accounts & privacy
 
-Anyone with access to the server can register a username/password. Passwords are hashed with scrypt; sessions use signed 30-day tokens. Each user only ever sees their own data. If you deploy it publicly, put it behind HTTPS.
+Registration asks for a username, email and password, protected by a built-in captcha (a server-generated distorted-SVG challenge — no third-party service; it deters casual bots, not determined ones). New accounts must click an emailed verification link before they can sign in. Passwords are hashed with scrypt; sessions use signed 30-day tokens. Each user only ever sees their own data, stored server-side in `data/db.json` — it persists across restarts and is independent of any browser. If you deploy publicly, put it behind HTTPS.
+
+### Email sending (verification links)
+
+Without email settings the server runs in **dev mode**: the verification link is shown on-screen right after sign-up instead of being emailed (fine for personal/local use, but it means email ownership isn't actually proven). To send real emails, add SMTP settings via environment variables or `data/config.json`:
+
+```json
+{
+  "smtpHost": "smtp.gmail.com",
+  "smtpPort": 587,
+  "smtpUser": "you@gmail.com",
+  "smtpPass": "an-app-password",
+  "smtpFrom": "you@gmail.com",
+  "baseUrl": "https://yourapp.example.com"
+}
+```
+
+`baseUrl` is what verification links point at. Note: **PythonAnywhere free accounts block outbound SMTP** — on that host either keep dev mode, or upgrade / switch to an HTTP email API.
 
 ## Layout
 

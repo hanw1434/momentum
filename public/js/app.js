@@ -65,7 +65,25 @@ async function boot() {
   if ('serviceWorker' in navigator) {
     try { await navigator.serviceWorker.register('/sw.js'); } catch { /* offline support optional */ }
   }
-  try { serverConfig = await api('/api/config'); } catch { /* google button just stays hidden */ }
+  try { serverConfig = await api('/api/config'); } catch { /* google button falls back to explainer */ }
+
+  // Email verification links look like /#/verify/<token>.
+  const vm = location.hash.match(/^#\/verify\/([0-9a-f-]{36})$/);
+  if (vm && !getToken()) {
+    history.replaceState(null, '', '#/today');
+    try {
+      const res = await api('/api/auth/verify', { method: 'POST', body: { token: vm[1] } });
+      setToken(res.token);
+      user = res.user;
+      renderShell();
+      toast('✅ Email verified — welcome to Momentum!');
+      return;
+    } catch (ex) {
+      renderAuth(ex.message);
+      return;
+    }
+  }
+
   if (getToken()) {
     try { ({ user } = await api('/api/me')); } catch { clearToken(); }
   }
@@ -74,12 +92,64 @@ async function boot() {
 
 // ---------------- auth screen ----------------
 
-function renderAuth() {
+const G_LOGO_SVG = '<svg viewBox="0 0 48 48" width="18" height="18"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>';
+
+function captchaWidget() {
+  const img = h('div', { class: 'captcha-img' });
+  const answer = h('input', {
+    class: 'input', placeholder: 'Type the characters above',
+    autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false'
+  });
+  let id = null;
+  async function refresh() {
+    answer.value = '';
+    img.textContent = '…';
+    try {
+      const d = await api('/api/captcha');
+      id = d.captchaId;
+      img.innerHTML = d.svg;
+    } catch {
+      img.textContent = 'Could not load captcha — retry';
+    }
+  }
+  refresh();
+  const el = h('div', { class: 'captcha-box' },
+    h('div', { class: 'captcha-row' },
+      img,
+      h('button', { class: 'icon-btn', type: 'button', title: 'New characters', onclick: refresh }, '↻')),
+    answer);
+  return { el, refresh, get id() { return id; }, get answer() { return answer.value; } };
+}
+
+function renderAuth(initialError = '') {
   let mode = 'login';
-  const err = h('p', { class: 'form-error' });
+  const err = h('p', { class: 'form-error' }, initialError);
   const username = h('input', { class: 'input', placeholder: 'Username', autocomplete: 'username', required: true });
+  const email = h('input', { class: 'input', type: 'email', placeholder: 'Email address', autocomplete: 'email' });
+  const emailWrap = h('div', { style: 'display:none' }, email);
   const password = h('input', { class: 'input', type: 'password', placeholder: 'Password', autocomplete: 'current-password', required: true });
+  const captcha = captchaWidget();
   const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Sign in');
+  const resendBtn = h('button', {
+    class: 'btn btn-ghost small-btn', type: 'button', style: 'display:none',
+    onclick: async () => {
+      err.textContent = '';
+      if (!captcha.answer.trim()) {
+        err.textContent = 'Fill in the (new) captcha first, then press resend.';
+        return;
+      }
+      try {
+        const res = await api('/api/auth/resend', {
+          method: 'POST',
+          body: { identifier: username.value, captchaId: captcha.id, captchaAnswer: captcha.answer }
+        });
+        showPending(res);
+      } catch (ex) {
+        err.textContent = ex.message;
+        captcha.refresh();
+      }
+    }
+  }, '📮 Resend verification email');
 
   const tabs = ['login', 'register'].map(m =>
     h('button', {
@@ -87,6 +157,9 @@ function renderAuth() {
       onclick: e => {
         mode = m;
         err.textContent = '';
+        resendBtn.style.display = 'none';
+        emailWrap.style.display = m === 'register' ? '' : 'none';
+        email.required = m === 'register';
         submit.textContent = m === 'login' ? 'Sign in' : 'Create account';
         tabs.forEach(t => t.classList.toggle('active', t === e.currentTarget));
       }
@@ -99,17 +172,40 @@ function renderAuth() {
       err.textContent = '';
       submit.disabled = true;
       try {
-        const res = await api(`/api/auth/${mode}`, { method: 'POST', body: { username: username.value, password: password.value } });
+        const body = { username: username.value, password: password.value, captchaId: captcha.id, captchaAnswer: captcha.answer };
+        if (mode === 'register') body.email = email.value;
+        const res = await api(`/api/auth/${mode}`, { method: 'POST', body });
+        if (res.needsVerification) {
+          showPending(res);
+          return;
+        }
         setToken(res.token);
         user = res.user;
         renderShell();
       } catch (ex) {
         err.textContent = ex.message;
+        captcha.refresh(); // captchas are single-use — always issue a fresh one
+        if (/verify your email/i.test(ex.message)) resendBtn.style.display = '';
       } finally {
         submit.disabled = false;
       }
     }
-  }, username, password, err, submit);
+  }, username, emailWrap, password, captcha.el, err, submit, resendBtn);
+
+  // Google entry point is always visible; unconfigured servers explain what's missing.
+  const gWrap = h('div', { class: 'gsi-holder' });
+  if (serverConfig.googleClientId) {
+    mountGoogleButton(gWrap, err);
+  } else {
+    const gLogo = h('span', { class: 'g-logo' });
+    gLogo.innerHTML = G_LOGO_SVG;
+    gWrap.append(h('button', {
+      class: 'btn btn-ghost google-btn', type: 'button',
+      onclick: () => {
+        err.textContent = "Google sign-in isn't active on this server yet — it needs a free Google OAuth client ID (see README → “Google sign-in”). Password sign-up works right away.";
+      }
+    }, gLogo, 'Continue with Google'));
+  }
 
   const card = h('div', { class: 'card auth-card' },
     h('div', { class: 'auth-hero' },
@@ -117,12 +213,36 @@ function renderAuth() {
       h('h1', {}, 'Momentum'),
       h('p', { class: 'tagline' }, 'Daily checklists, goals & reminders — your day, on track.')),
     h('div', { class: 'auth-tabs' }, tabs),
-    form);
+    form,
+    h('div', { class: 'divider' }, 'or'),
+    gWrap);
 
-  if (serverConfig.googleClientId) {
-    const holder = h('div', { class: 'gsi-holder' });
-    card.append(h('div', { class: 'divider' }, 'or'), holder);
-    mountGoogleButton(holder, err);
+  function showPending(res) {
+    const bits = [
+      h('div', { class: 'auth-hero' },
+        h('span', { class: 'starter-emoji' }, '📬'),
+        h('h1', {}, 'Verify your email'),
+        h('p', { class: 'tagline' }, res.message))
+    ];
+    if (res.devVerifyUrl) {
+      const tokenMatch = res.devVerifyUrl.match(/verify\/([0-9a-f-]{36})/);
+      bits.push(h('button', {
+        class: 'btn btn-primary',
+        onclick: async () => {
+          try {
+            const r = await api('/api/auth/verify', { method: 'POST', body: { token: tokenMatch[1] } });
+            setToken(r.token);
+            user = r.user;
+            renderShell();
+            toast('✅ Email verified — welcome to Momentum!');
+          } catch (ex) {
+            toast(ex.message);
+          }
+        }
+      }, '✅ Verify my email'));
+    }
+    bits.push(h('button', { class: 'btn btn-ghost', onclick: () => renderAuth() }, '← Back to sign in'));
+    card.replaceChildren(...bits);
   }
 
   root.replaceChildren(h('div', { class: 'auth-wrap' }, card));
