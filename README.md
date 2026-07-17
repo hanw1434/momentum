@@ -39,7 +39,29 @@ Calendar reminders fire as system notifications (plus in-app toasts) at each lea
 
 ## Deploying
 
-A `Dockerfile` is included — the app runs anywhere that runs containers (Render, Fly.io, Railway, a VPS). Two things to remember:
+### PythonAnywhere (free, persistent)
+
+1. Create a free account at [pythonanywhere.com](https://www.pythonanywhere.com) — your username becomes the URL (`https://<username>.pythonanywhere.com`).
+2. Open a **Bash console** there and run:
+   ```
+   git clone https://github.com/hanw1434/momentum.git
+   ```
+3. Go to the **Web** tab → *Add a new web app* → *Manual configuration* → pick the newest Python offered.
+4. On the web app page set **Source code** to `/home/<username>/momentum`, then click the **WSGI configuration file** link and replace its entire contents with:
+   ```python
+   import sys
+   sys.path.insert(0, '/home/<username>/momentum')
+   from wsgi import application
+   ```
+5. Click **Reload**. The site is live, with HTTPS, and data persists in `~/momentum/data/`.
+
+To update later: `cd ~/momentum && git pull`, then Reload on the Web tab.
+
+Note: free PythonAnywhere accounts restrict outbound internet to an allowlist. Password login works regardless; if Google sign-in verification is blocked, ask their support to allow `oauth2.googleapis.com` (commonly already allowed) or upgrade.
+
+### Anywhere else (Docker)
+
+A `Dockerfile` is included — the app runs on any container host (Render, Fly.io, Railway, a VPS). Two things to remember:
 
 - **Persistence**: all data is in `/app/data` — mount a persistent disk/volume there or accounts are lost on redeploy.
 - **HTTPS**: required for Google sign-in and for the PWA install prompt; every major host provides it automatically.
