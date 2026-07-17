@@ -104,12 +104,17 @@ function captchaWidget() {
   async function refresh() {
     answer.value = '';
     img.textContent = '…';
+    img.onclick = null;
     try {
       const d = await api('/api/captcha');
       id = d.captchaId;
       img.innerHTML = d.svg;
-    } catch {
-      img.textContent = 'Could not load captcha — retry';
+    } catch (ex) {
+      // A 404 here means the backend predates the captcha feature.
+      img.textContent = /not found/i.test(ex.message)
+        ? '⚠️ Captcha unavailable: the server is running outdated code. Reload/restart the server, then tap here to retry.'
+        : `⚠️ Could not load captcha (${ex.message}) — tap to retry.`;
+      img.onclick = refresh;
     }
   }
   refresh();

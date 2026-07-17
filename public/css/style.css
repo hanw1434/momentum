@@ -242,6 +242,7 @@ textarea.input { resize: vertical; min-height: 70px; line-height: 1.5; }
   display: flex; align-items: center; justify-content: center;
   color: var(--text); overflow: hidden;
   user-select: none;
+  text-align: center; padding: 6px; font-size: 0.85rem;
 }
 .captcha-img svg { display: block; }
 
