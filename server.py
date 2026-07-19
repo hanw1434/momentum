@@ -513,6 +513,28 @@ def add_task(user, body, day_id):
     return 200, {'task': {'id': task['id'], 'title': title, 'minutes': 0, 'completed': False}}
 
 
+@route('POST', '/api/days/([0-9a-f-]{36})/reorder')
+def reorder_tasks(user, body, day_id):
+    day = next((d for d in db['days'] if d['id'] == day_id and d['userId'] == user['id']), None)
+    if not day:
+        return 404, {'error': 'Day not found'}
+    ids = body.get('taskIds') if isinstance(body.get('taskIds'), list) else []
+    with LOCK:
+        tasks = {t['id']: t for t in db['tasks'] if t['dayId'] == day['id']}
+        order = 0
+        for tid in ids:
+            task = tasks.pop(str(tid), None)
+            if task:
+                task['order'] = order
+                order += 1
+        # Any task not mentioned keeps its relative position at the end.
+        for task in sorted(tasks.values(), key=lambda t: t['order']):
+            task['order'] = order
+            order += 1
+        save()
+    return 200, {'day': day_with_tasks(day)}
+
+
 @route('PATCH', '/api/tasks/([0-9a-f-]{36})')
 def update_task(user, body, task_id):
     task = next((t for t in db['tasks'] if t['id'] == task_id and t['userId'] == user['id']), None)
@@ -792,6 +814,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=PUBLIC, **kwargs)
+
+    def end_headers(self):
+        # Always revalidate: browsers heuristically cache module scripts
+        # otherwise, which serves stale app code after updates.
+        self.send_header('Cache-Control', 'no-cache')
+        super().end_headers()
 
     def handle_api(self, method):
         path = urlparse(self.path).path

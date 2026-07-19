@@ -98,6 +98,7 @@ function renderDay(root, day, isTomorrow) {
 
   const list = h('div', { class: 'task-list' });
   for (const t of day.tasks) list.append(taskRow(day, t, refresh, isTomorrow));
+  enableDragReorder(list, day);
 
   const addInput = h('input', { class: 'input', placeholder: isTomorrow ? 'Add a task for tomorrow…' : 'Add another task…' });
   const addForm = h('form', {
@@ -161,9 +162,49 @@ function renderDay(root, day, isTomorrow) {
   refresh();
 }
 
+// Pointer-based drag & drop (works with mouse and touch) on the ⠿ handle.
+function enableDragReorder(list, day) {
+  list.addEventListener('pointerdown', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    const dragRow = handle.closest('.task-row');
+    if (!dragRow) return;
+    e.preventDefault();
+    dragRow.classList.add('dragging');
+    try { handle.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+
+    const move = ev => {
+      const rows = [...list.querySelectorAll('.task-row')].filter(r => r !== dragRow);
+      let before = null;
+      for (const r of rows) {
+        const rect = r.getBoundingClientRect();
+        if (ev.clientY < rect.top + rect.height / 2) { before = r; break; }
+      }
+      if (before) list.insertBefore(dragRow, before);
+      else list.append(dragRow);
+    };
+    let done = false;
+    const finish = async () => {
+      if (done) return;
+      done = true;
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', finish);
+      handle.removeEventListener('pointercancel', finish);
+      dragRow.classList.remove('dragging');
+      const ids = [...list.querySelectorAll('.task-row')].map(r => r.dataset.taskId);
+      day.tasks.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      await api(`/api/days/${day.id}/reorder`, { method: 'POST', body: { taskIds: ids } });
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+  });
+}
+
 function taskRow(day, task, onChange, isTomorrow) {
-  const row = h('div', { class: `task-row${task.completed ? ' done' : ''}` });
+  const row = h('div', { class: `task-row${task.completed ? ' done' : ''}`, 'data-task-id': task.id });
   const titleEl = h('span', { class: 'task-title' }, task.title);
+  const grip = h('span', { class: 'drag-handle', title: 'Drag to reorder' }, '⠿');
 
   const startEdit = () => {
     const input = h('input', { class: 'input task-edit', value: task.title });
@@ -223,6 +264,7 @@ function taskRow(day, task, onChange, isTomorrow) {
   if (isTomorrow) {
     // Planning mode: no check-off, no timer — just the list, times editable.
     row.append(
+      grip,
       h('span', { class: 'task-mark' }, '•'),
       titleEl,
       editBtn,
@@ -248,6 +290,7 @@ function taskRow(day, task, onChange, isTomorrow) {
   }, '▶');
 
   row.append(
+    grip,
     cb,
     titleEl,
     live,

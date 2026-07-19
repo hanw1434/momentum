@@ -1,7 +1,7 @@
 // Momentum service worker: enables installation as a PWA and offline fallback.
 // Network-first for everything so development and deploys stay fresh;
 // cached copies are served only when the network is unavailable.
-const CACHE = 'momentum-v3';
+const CACHE = 'momentum-v5';
 
 self.addEventListener('install', event => {
   event.waitUntil(
@@ -25,9 +25,11 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  if (event.request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
+  if (event.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
   event.respondWith(
-    fetch(event.request)
+    // cache: 'no-cache' bypasses the HTTP cache's freshness heuristic and
+    // revalidates with the server, so updates are picked up immediately.
+    fetch(event.request.url, { cache: 'no-cache' })
       .then(res => {
         const copy = res.clone();
         caches.open(CACHE).then(cache => cache.put(event.request, copy));

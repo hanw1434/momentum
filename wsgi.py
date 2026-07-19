@@ -16,7 +16,8 @@ mimetypes.add_type('image/svg+xml', '.svg')
 def _json_response(start_response, status, obj):
     data = json.dumps(obj).encode()
     start_response(f"{status} {responses.get(status, '')}".strip(),
-                   [('Content-Type', 'application/json'), ('Content-Length', str(len(data)))])
+                   [('Content-Type', 'application/json'), ('Content-Length', str(len(data))),
+                    ('Cache-Control', 'no-cache')])
     return [data]
 
 
@@ -69,5 +70,6 @@ def application(environ, start_response):
     ctype = mimetypes.guess_type(fpath)[0] or 'application/octet-stream'
     with open(fpath, 'rb') as f:
         data = f.read()
-    start_response('200 OK', [('Content-Type', ctype), ('Content-Length', str(len(data)))])
+    start_response('200 OK', [('Content-Type', ctype), ('Content-Length', str(len(data))),
+                              ('Cache-Control', 'no-cache')])
     return [data]
