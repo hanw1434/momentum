@@ -52,6 +52,7 @@ function seriesFor(days, nDays, offset = 0) {
     out.push({
       date: localDate(d),
       dow: d.getDay(),
+      tracked: !!rec, // blank days draw an empty bar but are excluded from averages
       pct: s.total ? (s.done / s.total) * 100 : 0,
       mins: s.mins
     });
@@ -72,23 +73,29 @@ function statCard(kind, days) {
   const render = () => {
     const range = RANGES[chartRange[kind]];
     const cur = seriesFor(days, range.days);
-    const values = cur.map(p => isPct ? p.pct : p.mins);
-    const average = avg(values);
+    // Averages divide by tracked days only — blank days are discarded.
+    const trackedVals = cur.filter(p => p.tracked).map(p => isPct ? p.pct : p.mins);
+    const average = avg(trackedVals);
 
-    // Change vs the preceding period of equal length (not defined for all-time).
+    // Change vs the preceding period of equal length (not defined for all-time),
+    // also averaged over that period's tracked days only.
     let change = null;
+    let hasPrevData = false;
     if (range.days) {
-      const prevAvg = avg(seriesFor(days, range.days, range.days).map(p => isPct ? p.pct : p.mins));
+      const prevVals = seriesFor(days, range.days, range.days).filter(p => p.tracked).map(p => isPct ? p.pct : p.mins);
+      hasPrevData = prevVals.length > 0;
+      const prevAvg = avg(prevVals);
       if (prevAvg > 0) change = Math.round(((average - prevAvg) / prevAvg) * 100);
     }
     const changeEl = range.days
       ? (change === null
-          ? h('span', { class: 'stat-change flat' }, `no data in ${range.prev}`)
+          ? h('span', { class: 'stat-change flat' },
+              hasPrevData ? `— vs ${range.prev}` : `no data in ${range.prev}`)
           : h('span', { class: `stat-change ${change > 0 ? 'up' : change < 0 ? 'down' : 'flat'}` },
               `${change > 0 ? '▲' : change < 0 ? '▼' : '—'} ${Math.abs(change)}% vs ${range.prev}`))
-      : h('span', { class: 'stat-change flat' }, `${cur.length} day${cur.length === 1 ? '' : 's'} tracked`);
+      : h('span', { class: 'stat-change flat' }, `${trackedVals.length} day${trackedVals.length === 1 ? '' : 's'} tracked`);
 
-    const maxV = isPct ? 100 : Math.max(...values, 60);
+    const maxV = isPct ? 100 : Math.max(...cur.map(p => p.mins), 60);
     const bars = cur.map(p => {
       const v = isPct ? p.pct : p.mins;
       return h('div', {
@@ -113,8 +120,11 @@ function statCard(kind, days) {
       h('div', { class: 'stat-head' },
         h('div', {},
           h('p', { class: 'stat-caption' }, isPct ? '✅ Tasks completed' : '⏱️ Time tracked'),
-          h('p', { class: 'stat-big' }, isPct ? `${Math.round(average)}%` : fmtMinutes(Math.round(average))),
-          h('p', { class: 'stat-sub muted small' }, 'daily average'),
+          h('p', { class: 'stat-big' },
+            trackedVals.length === 0 ? '—' : isPct ? `${Math.round(average)}%` : fmtMinutes(Math.round(average))),
+          h('p', { class: 'stat-sub muted small' },
+            trackedVals.length === 0 ? 'no days tracked in this range'
+              : `average over ${trackedVals.length} tracked day${trackedVals.length === 1 ? '' : 's'}`),
           changeEl),
         h('span', { class: 'range-pill' }, range.label)),
       h('div', { class: 'chart-wrap' },

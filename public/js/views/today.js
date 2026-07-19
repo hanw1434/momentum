@@ -162,42 +162,56 @@ function renderDay(root, day, isTomorrow) {
   refresh();
 }
 
-// Pointer-based drag & drop (works with mouse and touch) on the ⠿ handle.
+// Drag & drop reordering. With a mouse you can grab anywhere on a row that
+// isn't a control (checkbox, buttons, inputs); on touch, use the ⠿ handle so
+// the list can still scroll. A 5px movement threshold keeps ordinary clicks
+// and double-clicks working exactly as before.
 function enableDragReorder(list, day) {
   list.addEventListener('pointerdown', e => {
-    const handle = e.target.closest('.drag-handle');
-    if (!handle) return;
-    const dragRow = handle.closest('.task-row');
-    if (!dragRow) return;
-    e.preventDefault();
-    dragRow.classList.add('dragging');
-    try { handle.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    if (e.button != null && e.button !== 0) return;
+    const row = e.target.closest('.task-row');
+    if (!row || !list.contains(row)) return;
+    if (e.target.closest('input, button, textarea, a, label')) return;
+    if (e.pointerType === 'touch' && !e.target.closest('.drag-handle')) return;
+
+    const pid = e.pointerId;
+    const startY = e.clientY;
+    let active = false;
 
     const move = ev => {
-      const rows = [...list.querySelectorAll('.task-row')].filter(r => r !== dragRow);
+      if (ev.pointerId !== pid) return;
+      if (!active) {
+        if (Math.abs(ev.clientY - startY) < 5) return;
+        active = true;
+        row.classList.add('dragging');
+        document.body.classList.add('drag-lock');
+      }
+      const others = [...list.querySelectorAll('.task-row')].filter(r => r !== row);
       let before = null;
-      for (const r of rows) {
+      for (const r of others) {
         const rect = r.getBoundingClientRect();
         if (ev.clientY < rect.top + rect.height / 2) { before = r; break; }
       }
-      if (before) list.insertBefore(dragRow, before);
-      else list.append(dragRow);
+      if (before) list.insertBefore(row, before);
+      else list.append(row);
     };
-    let done = false;
-    const finish = async () => {
-      if (done) return;
-      done = true;
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', finish);
-      handle.removeEventListener('pointercancel', finish);
-      dragRow.classList.remove('dragging');
+
+    const finish = ev => {
+      if (ev.pointerId !== pid) return;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      document.body.classList.remove('drag-lock');
+      if (!active) return; // it was just a click — nothing moved
+      row.classList.remove('dragging');
       const ids = [...list.querySelectorAll('.task-row')].map(r => r.dataset.taskId);
       day.tasks.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
-      await api(`/api/days/${day.id}/reorder`, { method: 'POST', body: { taskIds: ids } });
+      api(`/api/days/${day.id}/reorder`, { method: 'POST', body: { taskIds: ids } });
     };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', finish);
-    handle.addEventListener('pointercancel', finish);
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
   });
 }
 

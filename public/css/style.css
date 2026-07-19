@@ -318,6 +318,7 @@ textarea.input { resize: vertical; min-height: 70px; line-height: 1.5; }
   border-radius: 10px;
   cursor: grabbing;
 }
+body.drag-lock { cursor: grabbing; user-select: none; }
 
 /* ---------- archive ---------- */
 
